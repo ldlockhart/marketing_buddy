@@ -14,7 +14,14 @@ interface EmailEditorPageProps {
   onClose: () => void;
 }
 
-export default function EmailEditorPage({ campaignId, campaignName, initialContent, audienceId, campaignType = 'general', onClose }: EmailEditorPageProps) {
+export default function EmailEditorPage({ 
+  campaignId, 
+  campaignName, 
+  initialContent, 
+  audienceId, 
+  campaignType = 'general', 
+  onClose 
+}: EmailEditorPageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const beeInstanceRef = useRef<any>(null);
   
@@ -25,36 +32,105 @@ export default function EmailEditorPage({ campaignId, campaignName, initialConte
   const [userId, setUserId] = useState<string>('');
   const [performanceData, setPerformanceData] = useState<{ improvement: number; metric: string } | null>(null);
 
-  // Unified Initialization Effect
+  // ---------------------------------------------------------------------------
+  // Helper Functions (Defined here to be accessible to the effect and UI)
+  // ---------------------------------------------------------------------------
+
+  const handleSave = async (pageJson: string, pageHtml: string) => {
+    setSaving(true);
+    setSaveSuccess(false);
+
+    try {
+      const { error: updateError } = await supabase
+        .from('campaigns')
+        .update({ 
+          email_html: pageJson, 
+          updated_at: new Date().toISOString() 
+        })
+        .eq('id', campaignId);
+
+      if (updateError) throw updateError;
+
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err: any) {
+      console.error('Error saving campaign:', err);
+      setError('Failed to save email design');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fetchPerformanceData = async (uid: string) => {
+    try {
+      const { data: campaigns } = await supabase
+        .from('campaign_analytics')
+        .select('*')
+        .eq('user_id', uid)
+        .order('updated_at', { ascending: false })
+        .limit(5);
+
+      if (!campaigns || campaigns.length === 0) return;
+
+      const lastCampaign = campaigns[0];
+      const totalSent = lastCampaign.sent_count || 0;
+
+      if (totalSent === 0) return;
+
+      const actualOpenRate = ((lastCampaign.opened_count || 0) / totalSent) * 100;
+      const industryAvgOpenRate = 22;
+
+      const actualClickRate = ((lastCampaign.clicked_count || 0) / totalSent) * 100;
+      const industryAvgClickRate = 2.8;
+
+      const openRateImprovement = ((actualOpenRate - industryAvgOpenRate) / industryAvgOpenRate) * 100;
+      const clickRateImprovement = ((actualClickRate - industryAvgClickRate) / industryAvgClickRate) * 100;
+
+      if (openRateImprovement > clickRateImprovement && openRateImprovement > 10) {
+        setPerformanceData({ improvement: Math.round(openRateImprovement), metric: 'open rate' });
+      } else if (clickRateImprovement > 10) {
+        setPerformanceData({ improvement: Math.round(clickRateImprovement), metric: 'click rate' });
+      } else if (openRateImprovement > 5) {
+        setPerformanceData({ improvement: Math.round(openRateImprovement), metric: 'engagement' });
+      }
+    } catch (error) {
+      console.error('Error fetching performance data:', error);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Main Initialization Effect
+  // ---------------------------------------------------------------------------
+
   useEffect(() => {
     let isMounted = true;
 
-    const init = async () => {
-      // 1. Prevent double-initialization if SDK instance already exists
+    const initEditor = async () => {
+      // 1. Safety Check: If SDK is already running, do not re-run.
       if (beeInstanceRef.current) return;
 
       try {
         setLoading(true);
 
-        // 2. Authenticate User
+        // 2. Get User
         const { data: { user } } = await supabase.auth.getUser();
-        
-        // Stop if component unmounted while awaiting
-        if (!isMounted) return; 
+        if (!isMounted) return;
         
         if (!user) {
           throw new Error('Failed to authenticate user');
         }
         setUserId(user.id);
+        
+        // Start background fetch for stats
+        fetchPerformanceData(user.id);
 
-        // 3. Prepare Container (Nuclear Cleanup)
-        // This clears any "ghost" iframes from previous strict-mode renders
+        // 3. NUCLEAR CLEANUP: Clear container to prevent "ghost" iframes
         if (!containerRef.current) {
-             throw new Error('Beefree container ref not found');
+           throw new Error('Beefree container ref not found');
         }
         containerRef.current.innerHTML = '';
 
-        // 4. Fetch Token
+        // 4. Get Beefree Auth Token
         const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
         const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -80,22 +156,18 @@ export default function EmailEditorPage({ campaignId, campaignName, initialConte
 
         const token = await response.json();
 
-        // 5. Configure SDK
+        // 5. Configure the SDK
         const beeConfig = {
           container: 'beefree-container',
           language: 'en-US',
-          onSave: async (pageJson: string, pageHtml: string) => {
-             await handleSave(pageJson, pageHtml);
-          },
-          onSaveAsTemplate: async (pageJson: string, pageHtml: string) => {
-             await handleSave(pageJson, pageHtml);
-          },
+          onSave: (pageJson: string, pageHtml: string) => handleSave(pageJson, pageHtml),
+          onSaveAsTemplate: (pageJson: string, pageHtml: string) => handleSave(pageJson, pageHtml),
           onError: (error: unknown) => {
             console.error('Beefree error:', error);
             if (isMounted) setError('An error occurred in the email editor');
           },
           onAutoSave: (pageJson: string) => {
-             // Optional: console.log('Auto-saved'); 
+             // console.log('Auto-saved');
           },
           onLoad: () => {
              console.log('Beefree editor loaded successfully');
@@ -123,8 +195,7 @@ export default function EmailEditorPage({ campaignId, campaignName, initialConte
             }
         };
 
-        // 6. Start SDK
-        // Only start if we are still mounted and the container is clear
+        // 6. Start the SDK (Only if we are still mounted)
         if (isMounted && containerRef.current) {
              const bee = new BeefreeSDK(token);
              beeInstanceRef.current = bee;
@@ -140,100 +211,28 @@ export default function EmailEditorPage({ campaignId, campaignName, initialConte
       }
     };
 
-    // Run the async init function
-    init();
-    fetchPerformanceData();
+    initEditor();
 
-    // Cleanup function
+    // 7. Cleanup Function
     return () => {
       isMounted = false;
       beeInstanceRef.current = null;
-      // Ensure we clean up the DOM so the next mount starts fresh
+      // Wipe the DOM one last time to ensure next mount is clean
       if (containerRef.current) {
         containerRef.current.innerHTML = '';
       }
     };
-  }, []); // End useEffect
-
-  const handleSave = async (pageJson: string, pageHtml: string) => {
-    setSaving(true);
-    setSaveSuccess(false);
-
-    try {
-      const { error } = await supabase
-        .from('campaigns')
-        .update({
-          email_html: pageJson,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', campaignId);
-
-      if (error) throw error;
-
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
-    } catch (err: any) {
-      console.error('Error saving campaign:', err);
-      setError('Failed to save email design');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const fetchPerformanceData = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data: campaigns } = await supabase
-        .from('campaign_analytics')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('updated_at', { ascending: false })
-        .limit(5);
-
-      if (!campaigns || campaigns.length === 0) return;
-
-      const lastCampaign = campaigns[0];
-      const totalSent = lastCampaign.sent_count || 0;
-
-      if (totalSent === 0) return;
-
-      const actualOpenRate = ((lastCampaign.opened_count || 0) / totalSent) * 100;
-      const industryAvgOpenRate = 22;
-
-      const actualClickRate = ((lastCampaign.clicked_count || 0) / totalSent) * 100;
-      const industryAvgClickRate = 2.8;
-
-      const openRateImprovement = ((actualOpenRate - industryAvgOpenRate) / industryAvgOpenRate) * 100;
-      const clickRateImprovement = ((actualClickRate - industryAvgClickRate) / industryAvgClickRate) * 100;
-
-      if (openRateImprovement > clickRateImprovement && openRateImprovement > 10) {
-        setPerformanceData({
-          improvement: Math.round(openRateImprovement),
-          metric: 'open rate'
-        });
-      } else if (clickRateImprovement > 10) {
-        setPerformanceData({
-          improvement: Math.round(clickRateImprovement),
-          metric: 'click rate'
-        });
-      } else if (openRateImprovement > 5) {
-        setPerformanceData({
-          improvement: Math.round(openRateImprovement),
-          metric: 'engagement'
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching performance data:', error);
-    }
-  };
+  }, []); // Empty dependency array ensures this runs once on mount
 
   const handleExitEditor = () => {
     if (confirm('Are you sure you want to exit? Make sure you saved your changes.')) {
       onClose();
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   if (error && !beeInstanceRef.current) {
     return (
