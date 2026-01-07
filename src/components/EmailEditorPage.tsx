@@ -24,78 +24,124 @@ export default function EmailEditorPage({ campaignId, campaignName, initialConte
   const [userId, setUserId] = useState<string>('');
   const [performanceData, setPerformanceData] = useState<{ improvement: number; metric: string } | null>(null);
 
-  useEffect(() => {
+useEffect(() => {
     let isMounted = true;
 
     const init = async () => {
-      if (isMounted && !beeInstanceRef.current) {
-        await getUserAndInitialize();
+      // Prevent double-firing if we already have an instance
+      if (beeInstanceRef.current) return;
+
+      try {
+        // 1. Get User
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!isMounted) return; // Stop if unmounted
+
+        if (!user) {
+          console.error('No user found');
+          setError('Failed to authenticate user');
+          setLoading(false);
+          return;
+        }
+
+        setUserId(user.id);
+
+        // 2. Prepare Container
+        if (!containerRef.current) {
+          throw new Error('Beefree container not found');
+        }
+
+        // NUCLEAR CLEANUP: Clear any existing iframes/garbage before starting
+        containerRef.current.innerHTML = ''; 
+
+        // 3. Get Token
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+        const response = await fetch(`${supabaseUrl}/functions/v1/beefree-auth`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseAnonKey}`,
+          },
+          body: JSON.stringify({ uid: `${user.id}-${campaignId}` })
+        });
+
+        if (!isMounted) return; // Stop if unmounted during fetch
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to authenticate with Beefree');
+        }
+
+        const token = await response.json();
+        console.log('Token received, initializing SDK...');
+
+        // 4. Initialize SDK
+        const beeConfig = {
+          container: 'beefree-container',
+          language: 'en-US',
+          onSave: (pageJson: string, pageHtml: string) => handleSave(pageJson, pageHtml),
+          onSaveAsTemplate: (pageJson: string, pageHtml: string) => handleSave(pageJson, pageHtml),
+          onError: (error: unknown) => {
+            console.error('Beefree error:', error);
+            if (isMounted) setError('An error occurred in the email editor');
+          },
+          onAutoSave: (pageJson: string) => console.log('Auto-saved'),
+          onLoad: () => {
+            console.log('Beefree editor loaded successfully');
+            if (isMounted) setLoading(false);
+          },
+        };
+
+        const template = initialContent || {
+            page: {
+                body: {
+                    container: { style: { 'background-color': '#ffffff' } },
+                    rows: [{
+                        columns: [{
+                            modules: [{
+                                type: 'mailup-bee-newsletter-modules-text',
+                                descriptor: {
+                                    text: {
+                                        html: '<p style="text-align: center;">Welcome to your email editor!</p>'
+                                    }
+                                }
+                            }]
+                        }]
+                    }]
+                }
+            }
+        };
+
+        if (isMounted) {
+            const bee = new BeefreeSDK(token);
+            beeInstanceRef.current = bee;
+            await bee.start(beeConfig, template);
+        }
+
+      } catch (err: any) {
+        console.error('Initialization error:', err);
+        if (isMounted) {
+          setError(err.message || 'Failed to load email editor');
+          setLoading(false);
+        }
       }
     };
 
     init();
     fetchPerformanceData();
 
+    // CLEANUP FUNCTION
     return () => {
       isMounted = false;
-      if (beeInstanceRef.current) {
-        try {
-          beeInstanceRef.current = null;
-        } catch (err) {
-          console.error('Error cleaning up Beefree:', err);
-        }
+      // Destroy the SDK instance ref
+      beeInstanceRef.current = null;
+      // Clear the DOM to prevent ghost iframes on remount
+      if (containerRef.current) {
+        containerRef.current.innerHTML = '';
       }
     };
-  }, []);
-
-  const getUserAndInitialize = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        setUserId(user.id);
-        await initializeEditor(user.id);
-      }
-    } catch (err) {
-      console.error('Error getting user:', err);
-      setError('Failed to authenticate user');
-      setLoading(false);
-    }
-  };
-
-  const initializeEditor = async (uid: string) => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      const container = document.getElementById('beefree-container');
-      if (!container) {
-        throw new Error('Beefree container not found');
-      }
-      console.log('Container found:', container);
-
-      const beeConfig = {
-        container: 'beefree-container',
-        language: 'en-US',
-        onSave: async (pageJson: string, pageHtml: string) => {
-          await handleSave(pageJson, pageHtml);
-        },
-        onSaveAsTemplate: async (pageJson: string, pageHtml: string) => {
-          await handleSave(pageJson, pageHtml);
-        },
-        onError: (error: unknown) => {
-          console.error('Beefree error:', error);
-          setError('An error occurred in the email editor');
-        },
-        onAutoSave: (pageJson: string) => {
-          console.log('Auto-saved');
-        },
-        onLoad: () => {
-          console.log('Beefree editor loaded successfully');
-          setLoading(false);
-        },
-      };
+  }, []); // Empty dependency array
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
